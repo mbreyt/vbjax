@@ -279,8 +279,8 @@ class TVB(nn.Module):
         buf = self.initialize_buffer(key, initial_cond)
         
         chunksize = int((self.stimulus.shape[0]/sim_len)) if jnp.any(self.stimulus) else 1000
-        stimulus = stimulus.reshape((sim_len, int(chunksize*self.dt), -1)) if jnp.any(self.stimulus) else jnp.zeros((sim_len, int(chunksize*self.dt), 1))
-        # jax.debug.print('buf {x}', x=buf.shape)
+        stimulus = self.stimulus.reshape((sim_len, int(chunksize*self.dt), -1)) if jnp.any(self.stimulus) else jnp.zeros((sim_len, int(chunksize*self.dt), 1))
+        jax.debug.print('stim shape {x}', x=stimulus.shape)
         buf, rv = run_sim(module, buf, stimulus, jax.random.split(key, (sim_len, int(chunksize*self.dt))))
 
         # jax.debug.print('rv {x}', x=rv[0].shape)
@@ -323,7 +323,7 @@ class Simple_MLP(nn.Module):
     n_hiddens: Sequence[int]
     act_fn: Callable
     # kernel_init: Callable = jax.nn.initializers.normal(1e-3)
-    kernel_init: Callable = jax.nn.initializers.he_normal()
+    kernel_init: Callable = None
     coupled: bool = False
     n_pars: int = 0
     scaling_factor: float = .01
@@ -337,7 +337,7 @@ class Simple_MLP(nn.Module):
         # c = args[0]
         # jax.debug.print('x[0] {x} xs[0] {y} args[0] {z}', x=x.shape, y=xs.shape, z=c.shape)
         # jax.debug.print('x[0] {x} xs[0] {y}', x=x.shape, y=xs.shape)
-        # jax.debug.print('kernel {x}', x=self.layers[0])
+        
         x = jnp.c_[x, xs]
         x = jnp.c_[x, args[0]] if self.coupled else x
         for layer in self.layers:
@@ -425,6 +425,7 @@ class NeuralOdeWrapper(nn.Module):
         # dfun = self.dfun(self.out_dim, self.n_hiddens, self.act_fn, coupled=self.coupled)
 
         if not self.integrate:
+            x = jnp.c_[inputs[0], inputs[1]]
             deriv = self.dfun(inputs[0], inputs[1])
             # jax.debug.print('deriv {x}', x=deriv[0])
             return deriv
