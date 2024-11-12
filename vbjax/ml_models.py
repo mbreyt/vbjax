@@ -99,6 +99,50 @@ class Heun_step(nn.Module):
         return nx, x
 
 
+class Euler_step(nn.Module):
+    dfun: Callable
+    adhoc: Callable
+    dt: float
+    nh: Optional[int]
+    p: Optional[Any]
+    stvar: Optional[int] = 0
+    external_i: Optional[int] = False
+    
+
+    @nn.compact
+    def __call__(self, x, xs, t, *args):
+        tmap = jax.tree_util.tree_map
+        d1 = self.dfun(x, xs, *args) if self.p else self.dfun(x, *args)
+        nx = tmap(lambda x,d: x + self.dt*d, x, d1)
+        nx = tmap(self.adhoc, nx)
+        return nx, x
+
+
+class Heun_step_stim(nn.Module):
+    dfun: Callable
+    adhoc: Callable
+    dt: float
+    nh: Optional[int]
+    p: Optional[Any]
+    stvar: Optional[int] = 0
+    external_i: Optional[int] = False
+    
+
+    @nn.compact
+    def __call__(self, x, xs, t, *args):
+        tmap = jax.tree_util.tree_map
+        d1 = self.dfun(x, xs, *args) if self.p else self.dfun(x, *args)
+        xi = tmap(lambda x,d: x + self.dt*d, x, d1)
+        xi = tmap(self.adhoc, xi)
+
+        d2 = self.dfun(xi, xs, *args) if self.p else self.dfun(xi, *args)
+        nx = tmap(lambda x, d1,d2: x + self.dt*0.5*(d1 + d2), x, d1, d2)
+        nx = tmap(self.adhoc, nx)
+        return nx, x
+
+
+
+
 class Buffer_step(nn.Module):
     dfun: Callable
     adhoc: Callable
@@ -351,28 +395,29 @@ class Simple_MLP_additive_c(nn.Module):
     out_dim: int
     n_hiddens: Sequence[int]
     act_fn: Callable
-    kernel_init: Callable = jax.nn.initializers.he_normal(  )
-    coupled: bool = True
+    kernel_init: Callable = None
+    coupled: bool = False
+    scaling_factor: float = 1.
 
     def setup(self):
         self.layers = [nn.Dense(feat, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros) for feat in self.n_hiddens]
-        self.output = nn.Dense(self.out_dim, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros)
+        self.output = nn.Dense(self.out_dim, kernel_init=self.kernel_init, use_bias=False)#, bias_init=nn.initializers.zeros)
     
     @nn.compact
-    def __call__(self, x, xs, *args, scaling_factor=.01):
-        c = args[0]
-        jax.debug.print('x[0] {x} xs[0] {y} args[0] {z}', x=x[0], y=xs[0], z=c[0])
+    def __call__(self, x, xs, *args):
+        # c = args[0]
+        # jax.debug.print('x[0] {x} xs[0] {y} args[0] {z}', x=x[0], y=xs[0], z=c[0])
         x = jnp.c_[x, xs]
         for layer in self.layers:
             x = layer(x)    
             x = self.act_fn(x)
         x = self.output(x)
-        
-        x = x*scaling_factor
-        # jax.debug.print('x before {x}', x=x[0])
+    
+        x = x*self.scaling_factor
+        # jax.debug.print('x[0] {x} xs[0] {y} args[0] {z}', x=x[0], y=xs[0], z=c[0])
         x += jnp.c_[jnp.zeros(args[0].shape), args[0]] if self.coupled else x
-        # jax.debug.print('x after {x}', x=x[0])
         return x
+
 
 
 
@@ -409,7 +454,7 @@ class NeuralOdeWrapper(nn.Module):
     act_fn: Callable
     extra_p: int
     dt: Optional[float] = 1.
-    step: Optional[Callable] = Heun_step
+    step: Optional[Callable] = Euler_step
     integrator: Optional[Callable] = Integrator
     dfun: Optional[Callable] = None
     integrate: Optional[bool] = True
@@ -420,13 +465,16 @@ class NeuralOdeWrapper(nn.Module):
     
 
     @nn.compact
-    def __call__(self, inputs):
+    def __call__(self, inputs, integrate=True, additive=False):
+        # jax.debug.print('inputs {x}', x=inputs.shape)
         (x, i_ext) = inputs if self.coupled else (inputs, None)
         # dfun = self.dfun(self.out_dim, self.n_hiddens, self.act_fn, coupled=self.coupled)
-
-        if not self.integrate:
+        if not integrate:
             x = jnp.c_[inputs[0], inputs[1]]
-            deriv = self.dfun(inputs[0], inputs[1])
+            if additive:
+                deriv = self.dfun(inputs[0], inputs[1], inputs[2])
+            else:
+                deriv = self.dfun(inputs[0], inputs[1])
             # jax.debug.print('deriv {x}', x=deriv[0])
             return deriv
 
