@@ -171,3 +171,19 @@ class FourierLayer(nn.Module):
     m = jnp.dot(inputs, kernel)
     m = m + bias_m
     return m
+
+
+class OutputLayerAdditive(nn.Module):
+  out_dim: int
+  kernel_init: Callable
+  bias_init: Callable = nn.initializers.zeros_init()
+
+  @nn.compact
+  def __call__(self, inputs):
+    kernel_m = self.param('kernel',
+                        self.kernel_init, # Initialization function
+                        (inputs.shape[-1], self.out_dim), (self.out_dim,))  # shape info.
+    m = jnp.dot(inputs, kernel_m)
+    bias_m = self.param('bias', self.bias_init, (self.out_dim,))
+    m = m + bias_m
+    return m
