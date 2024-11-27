@@ -4,12 +4,13 @@ from typing import Callable, Sequence, Optional, Any
 from collections import namedtuple, defaultdict
 from jax._src.prng import PRNGKeyArrayImpl
 import jax.random as random
-from vbjax.layers import MaskedMLP, OutputLayer, create_degrees, create_masks
+from vbjax.layers import MaskedMLP, OutputLayer, create_degrees, create_masks, OutputLayerAdditive
 import jax
 from flax.linen.initializers import zeros
 import tqdm
 from .neural_mass import bold_dfun, bold_default_theta, mpr_default_theta
 from flax.core.frozen_dict import freeze, unfreeze
+
 
 DelayHelper = namedtuple('DelayHelper', 'Wt lags ix_lag_from max_lag n_to n_from')
 
@@ -65,6 +66,7 @@ class MAF(nn.Module):
         for made in self.mades:
             ms, logp = made(u)
             u = jnp.exp(0.5 * logp) * (u - ms)
+            # jax.debug.print('logp {x}', x=jnp.mean(jnp.sum(logp, axis=1)))
             logdet_dudx += 0.5 * jnp.sum(logp, axis=1)
         return u, logdet_dudx
 
@@ -338,7 +340,7 @@ class TVB(nn.Module):
         # bold_buf = bold_buf.at[0].set(1.)
 
         # bold_buf, bold = run_bold(module, bold_buf, rv[...,0].reshape((-1, int(20000/self.dt), self.tvb_p['dh'].n_from, 1)))
-        return rv
+        # return rv
         return rv.reshape(-1, self.tvb_p['dh'].n_from, self.nst_vars+self.n_pars)#, bold
 
 
@@ -366,8 +368,8 @@ class Simple_MLP(nn.Module):
     out_dim: int
     n_hiddens: Sequence[int]
     act_fn: Callable
-    # kernel_init: Callable = jax.nn.initializers.normal(1e-3)
-    kernel_init: Callable = None
+    kernel_init: Callable = jax.nn.initializers.normal(1e-3)
+    # kernel_init: Callable = None
     coupled: bool = False
     n_pars: int = 0
     scaling_factor: float = .01
@@ -384,14 +386,52 @@ class Simple_MLP(nn.Module):
         
         x = jnp.c_[x, xs]
         x = jnp.c_[x, args[0]] if self.coupled else x
+        # jax.debug.print('x[0] {x}', x=x[:2])
+        # jax.debug.print('x[0] {x}', x=x[0])
         for layer in self.layers:
             x = layer(x)
             x = self.act_fn(x)
         x = self.output(x)
+        
         return x*self.scaling_factor
 
 
 class Simple_MLP_additive_c(nn.Module):
+    out_dim: int
+    n_hiddens: Sequence[int]
+    act_fn: Callable
+    # kernel_init: Callable = None
+    kernel_init: Callable = jax.nn.initializers.normal(1e-3)
+    coupled: bool = False
+    scaling_factor: float = 1.
+
+    def setup(self):
+        self.layers = [nn.Dense(feat, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros) for feat in self.n_hiddens]
+        self.output = nn.Dense(self.out_dim, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros) # use_bias=False
+    
+    @nn.compact
+    def __call__(self, x, xs, *args):
+        c = args[0]
+        # jax.debug.print('x[0] {x} xs[0] {y} args[0] {z}', x=x[0], y=xs[0], z=c[0])
+        x = jnp.c_[x, xs]
+        # jax.debug.print('x[0] {x}', x=x[:2])
+        for layer in self.layers:
+            x = layer(x)    
+            x = self.act_fn(x)
+        x = self.output(x)
+    
+        x = x*self.scaling_factor
+        
+        # jax.debug.print('x[0] {x} xs[0] {y} args[0] {z}', x=x[0], y=xs[0], z=c[0])
+        # jax.debug.print('x.shape {x} xs.shape {y} args.shape {z}', x=x.shape, y=xs.shape, z=c.shape)
+        # jax.debug.print('before x[0] {x}', x=x[0])
+        x += jnp.c_[jnp.zeros(args[0].shape), args[0]] if self.coupled else x
+        # jax.debug.print('after x[0] {x}', x=x[0])
+        return x
+
+
+
+class Additive_c(nn.Module):
     out_dim: int
     n_hiddens: Sequence[int]
     act_fn: Callable
@@ -401,7 +441,7 @@ class Simple_MLP_additive_c(nn.Module):
 
     def setup(self):
         self.layers = [nn.Dense(feat, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros) for feat in self.n_hiddens]
-        self.output = nn.Dense(self.out_dim, kernel_init=self.kernel_init, use_bias=False)#, bias_init=nn.initializers.zeros)
+        self.output = nn.OutputLayerAdditive(self.out_dim, kernel_init=self.kernel_init)#, bias_init=nn.initializers.zeros)
     
     @nn.compact
     def __call__(self, x, xs, *args):
@@ -414,10 +454,12 @@ class Simple_MLP_additive_c(nn.Module):
         x = self.output(x)
     
         x = x*self.scaling_factor
+        # jax.debug.print('x[0] {x}', x=x[0])
+        # jax.debug.print('c[0] {x}', x=c[0])
         # jax.debug.print('x[0] {x} xs[0] {y} args[0] {z}', x=x[0], y=xs[0], z=c[0])
         x += jnp.c_[jnp.zeros(args[0].shape), args[0]] if self.coupled else x
+        # jax.debug.print('after x[0] {x}', x=x[0])
         return x
-
 
 
 
@@ -450,16 +492,13 @@ class MontBrio(nn.Module):
 
 class NeuralOdeWrapper(nn.Module):
     out_dim: int
-    n_hiddens: Sequence[int]
-    act_fn: Callable
     extra_p: int
     dt: Optional[float] = 1.
-    step: Optional[Callable] = Euler_step
+    step: Optional[Callable] = Heun_step
     integrator: Optional[Callable] = Integrator
     dfun: Optional[Callable] = None
     integrate: Optional[bool] = True
     coupled: Optional[bool] = False
-    i_ext: Optional[bool] = False
     stvar: Optional[int] = 0
     adhoc: Optional[Callable] = lambda x : x
     
@@ -467,17 +506,20 @@ class NeuralOdeWrapper(nn.Module):
     @nn.compact
     def __call__(self, inputs, integrate=True, additive=False):
         # jax.debug.print('inputs {x}', x=inputs.shape)
-        (x, i_ext) = inputs if self.coupled else (inputs, None)
+        
         # dfun = self.dfun(self.out_dim, self.n_hiddens, self.act_fn, coupled=self.coupled)
         if not integrate:
-            x = jnp.c_[inputs[0], inputs[1]]
+            # x = jnp.c_[inputs[0], inputs[1]]
             if additive:
+                # jax.debug.print('deriv {x}', x=(inputs[0][:2], inputs[1][:2], inputs[2][:2]))
                 deriv = self.dfun(inputs[0], inputs[1], inputs[2])
             else:
+                # jax.debug.print('deriv {x}', x=(inputs[0][:2], inputs[1][:2]))
                 deriv = self.dfun(inputs[0], inputs[1])
             # jax.debug.print('deriv {x}', x=deriv[0])
             return deriv
-
+        
+        (x, i_ext) = inputs if self.coupled else (inputs, None)
         in_ax = (0,0,0) if self.coupled else (0,0)
         integrate = self.integrator(self.dfun.__call__, self.step, self.adhoc, self.dt, in_ax=in_ax, p=True)
         
