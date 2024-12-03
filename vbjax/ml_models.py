@@ -144,7 +144,6 @@ class Heun_step_stim(nn.Module):
 
 
 
-
 class Buffer_step(nn.Module):
     dfun: Callable
     adhoc: Callable
@@ -242,6 +241,8 @@ class TVB(nn.Module):
     stimulus: Optional[Sequence] = jnp.array([])
     node_stim = 0
     training: bool = False
+    bold_buf_size: int = 2000
+    bold_dt: float = 0.01
 
     def delay_apply(self, dh: DelayHelper, t, buf):
         return (dh.Wt * buf[t - dh.lags, dh.ix_lag_from, :]).sum(axis=1)
@@ -326,22 +327,21 @@ class TVB(nn.Module):
         
         chunksize = int((self.stimulus.shape[0]/sim_len)) if jnp.any(self.stimulus) else 1000
         stimulus = self.stimulus.reshape((sim_len, int(chunksize*self.dt), -1)) if jnp.any(self.stimulus) else jnp.zeros((sim_len, int(chunksize*self.dt), 1))
-        jax.debug.print('stim shape {x}', x=stimulus.shape)
+        # jax.debug.print('stim shape {x}', x=stimulus.shape)
         buf, rv = run_sim(module, buf, stimulus, jax.random.split(key, (sim_len, int(chunksize*self.dt))))
 
-        # jax.debug.print('rv {x}', x=rv[0].shape)
-        # jax.debug.print('rv {x}', x=rv[1].shape)
-        # dummy_adhoc_bold = lambda x: x
-        # bold_dfun_p = lambda sfvq, x: bold_dfun(sfvq, x, bold_default_theta)
-        # module = self.integrator(bold_dfun_p, Heun_step, dummy_adhoc_bold, self.dt/10000, nh=int(self.tvb_p['dh'].max_lag), p=1)
-        # run_bold = nn.scan(self.bold_monitor.__call__)
+        rv = jnp.mean(rv, axis=1)
+        dummy_adhoc_bold = lambda x: x
+        bold_dfun_p = lambda sfvq, x: bold_dfun(sfvq, x, bold_default_theta)
+        module = self.integrator(bold_dfun_p, Heun_step, dummy_adhoc_bold, self.bold_dt, nh=int(self.tvb_p['dh'].max_lag), p=1)
+        run_bold = nn.scan(self.bold_monitor.__call__)
 
-        # bold_buf = jnp.ones((4, self.tvb_p['dh'].n_from, 1))
-        # bold_buf = bold_buf.at[0].set(1.)
+        bold_buf = jnp.ones((4, self.tvb_p['dh'].n_from, 1))
+        bold_buf = bold_buf.at[0].set(1.)
 
-        # bold_buf, bold = run_bold(module, bold_buf, rv[...,0].reshape((-1, int(20000/self.dt), self.tvb_p['dh'].n_from, 1)))
-        # return rv
-        return rv.reshape(-1, self.tvb_p['dh'].n_from, self.nst_vars+self.n_pars)#, bold
+        bold_buf, bold = run_bold(module, bold_buf, rv[...,0].reshape((-1, int(self.bold_buf_size), self.tvb_p['dh'].n_from, 1)))
+
+        return rv.reshape(-1, self.tvb_p['dh'].n_from, self.nst_vars), bold
 
 
 
@@ -411,7 +411,7 @@ class Simple_MLP_additive_c(nn.Module):
     
     @nn.compact
     def __call__(self, x, xs, *args):
-        c = args[0]
+        # c = args[0]
         # jax.debug.print('x[0] {x} xs[0] {y} args[0] {z}', x=x[0], y=xs[0], z=c[0])
         x = jnp.c_[x, xs]
         # jax.debug.print('x[0] {x}', x=x[:2])
@@ -469,7 +469,6 @@ class MontBrio(nn.Module):
     scaling_factor: float = 1.
 
     def setup(self):
-        self.eta = self.dfun_pars.eta
         self.Delta = self.dfun_pars.Delta
         self.tau = self.dfun_pars.tau
         self.I = self.dfun_pars.I
@@ -482,11 +481,13 @@ class MontBrio(nn.Module):
     def __call__(self, x, xs, *args):
         # xs contains regions parameters not implemented yet
         c = args[0] if self.coupled else jnp.zeros(x.shape)
-        # jax.debug.print('x[0] {x} c[0] {z}', x=x[0], z=c[0])
+        # jax.debug.print('x[0] {x} xs[0] {y} c[0] {z}', x=x[0], y=xs[0], z=c[0])
+        # jax.debug.print('x {x} xs {y} c {z}', x=x.shape, y=xs.shape, z=c.shape)
+        eta = xs
         r, V = x[:,:1], x[:,1:]
         I_c = self.cr * c[:,:1]
         r_dot =  (1 / self.tau) * (self.Delta / (jnp.pi * self.tau) + 2 * r * V)
-        v_dot = (1 / self.tau) * (V ** 2 + self.eta + self.J * self.tau * r + self.I + I_c - (jnp.pi ** 2) * (r ** 2) * (self.tau ** 2))
+        v_dot = (1 / self.tau) * (V ** 2 + eta + self.J * self.tau * r + self.I + I_c - (jnp.pi ** 2) * (r ** 2) * (self.tau ** 2))
         return jnp.c_[r_dot, v_dot]*self.scaling_factor
 
 
