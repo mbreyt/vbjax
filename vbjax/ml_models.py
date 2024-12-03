@@ -8,7 +8,7 @@ from vbjax.layers import MaskedMLP, OutputLayer, create_degrees, create_masks, O
 import jax
 from flax.linen.initializers import zeros
 import tqdm
-from .neural_mass import bold_dfun, bold_default_theta, mpr_default_theta
+from .neural_mass import bold_dfun, bold_default_theta
 from flax.core.frozen_dict import freeze, unfreeze
 
 
@@ -303,8 +303,8 @@ class TVB(nn.Module):
 
     @nn.compact
     def __call__(self, inputs, g=0, sim_len=0, seed=42, initial_cond=jnp.array([]), mlp=True):
-        if inputs==None:
-            inputs = jnp.ones((1, self.nst_vars))
+        # if inputs==None:
+        #     inputs = jnp.ones((1, self.nst_vars))
         region_pars = inputs
         key = jax.random.PRNGKey(seed)
         # buf = self.initialize_buffer(key, initial_cond)
@@ -464,18 +464,17 @@ class Additive_c(nn.Module):
 
 
 class MontBrio(nn.Module):
-    dfun_pars: Optional[defaultdict] = mpr_default_theta
+    dfun_pars: None #Optional[defaultdict] = mpr_default_theta
     coupled: bool = False
     scaling_factor: float = 1.
 
     def setup(self):
-        self.Delta = self.dfun_pars.Delta
-        self.tau = self.dfun_pars.tau
-        self.I = self.dfun_pars.I
-        self.J = self.dfun_pars.J
-        self.cr = self.dfun_pars.cr
-        self.cv = self.dfun_pars.cv
-        
+        self.Delta = 1.0
+        self.tau = 1.0
+        self.I = 0
+        self.J = 15.0
+        self.cr = 1.0
+        self.cv = 0.0
     
     @nn.compact
     def __call__(self, x, xs, *args):
