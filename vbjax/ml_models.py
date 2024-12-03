@@ -291,7 +291,7 @@ class TVB(nn.Module):
         stim_t_count = jnp.c_[t_count, stim]
         # jax.debug.print('stim_t_count {x}', x=stim_t_count.shape)
         buf, rv = module(buf, dWt, stim_t_count)
-        return buf, rv
+        return buf, jnp.mean(rv.reshape(-1, 10, self.tvb_p['dh'].n_from, 2), axis=1)
 
     def bold_monitor(self, module, bold_buf, rv, p=bold_default_theta):
         t_count = jnp.tile(jnp.arange(rv.shape[0])[...,None, None,None], (4, self.tvb_p['dh'].n_from, 2)) # (buf_len, regions, state_vars)
@@ -330,7 +330,6 @@ class TVB(nn.Module):
         # jax.debug.print('stim shape {x}', x=stimulus.shape)
         buf, rv = run_sim(module, buf, stimulus, jax.random.split(key, (sim_len, int(chunksize*self.dt))))
 
-        rv = jnp.mean(rv, axis=1)
         dummy_adhoc_bold = lambda x: x
         bold_dfun_p = lambda sfvq, x: bold_dfun(sfvq, x, bold_default_theta)
         module = self.integrator(bold_dfun_p, Heun_step, dummy_adhoc_bold, self.bold_dt, nh=int(self.tvb_p['dh'].max_lag), p=1)
