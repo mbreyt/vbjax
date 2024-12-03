@@ -243,6 +243,7 @@ class TVB(nn.Module):
     training: bool = False
     bold_buf_size: int = 2000
     bold_dt: float = 0.01
+    chunksize: int = 1000
 
     def delay_apply(self, dh: DelayHelper, t, buf):
         return (dh.Wt * buf[t - dh.lags, dh.ix_lag_from, :]).sum(axis=1)
@@ -271,7 +272,7 @@ class TVB(nn.Module):
             jax.random.uniform(key=key, shape=(dh.n_from, 1), minval=0.1, maxval=2.0),
             jax.random.uniform(key=key, shape=(dh.n_from, 1), minval=-2., maxval=1.5)
             ]
-        initial_cond = fixed_initial_cond if fixed_initial_cond.any() else initial_cond
+        # initial_cond = fixed_initial_cond if fixed_initial_cond.any() else initial_cond
         # horizon is set at the start of the buffer because rolled at the start of chunk
         buf = buf.at[int(1/self.dt):,:,:self.nst_vars].add( initial_cond )
         return buf
@@ -325,10 +326,10 @@ class TVB(nn.Module):
 
         buf = self.initialize_buffer(key, initial_cond)
         
-        chunksize = int((self.stimulus.shape[0]/sim_len)) if jnp.any(self.stimulus) else 1000
-        stimulus = self.stimulus.reshape((sim_len, int(chunksize*self.dt), -1)) if jnp.any(self.stimulus) else jnp.zeros((sim_len, int(chunksize*self.dt), 1))
+        # stimulus = self.stimulus.reshape((sim_len, int(self.chunksize*self.dt), -1)) if jnp.any(self.stimulus) else jnp.zeros((sim_len, int(self.chunksize*self.dt), 1))
+        stimulus = jnp.zeros((sim_len, int(self.chunksize*self.dt), 1))
         # jax.debug.print('stim shape {x}', x=stimulus.shape)
-        buf, rv = run_sim(module, buf, stimulus, jax.random.split(key, (sim_len, int(chunksize*self.dt))))
+        buf, rv = run_sim(module, buf, stimulus, jax.random.split(key, (sim_len, int(self.chunksize*self.dt))))
 
         dummy_adhoc_bold = lambda x: x
         bold_dfun_p = lambda sfvq, x: bold_dfun(sfvq, x, bold_default_theta)
@@ -339,7 +340,6 @@ class TVB(nn.Module):
         bold_buf = bold_buf.at[0].set(1.)
 
         bold_buf, bold = run_bold(module, bold_buf, rv[...,0].reshape((-1, int(self.bold_buf_size), self.tvb_p['dh'].n_from, 1)))
-
         return rv.reshape(-1, self.tvb_p['dh'].n_from, self.nst_vars), bold
 
 
