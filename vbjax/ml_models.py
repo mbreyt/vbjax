@@ -162,7 +162,7 @@ class Buffer_step(nn.Module):
         nh = self.nh
         tmap = jax.tree_util.tree_map
         x = tmap(lambda buf: buf[nh + t_step], buf)
-        # jax.debug.print('buffer {x}', x=buf.shape)
+        # jax.debug.print('buffer {x}', x=t)
         # jax.debug.print('x {x}', x=x.shape)
         d1 = self.dfun(buf, x, nh + t_step,  t)
         xi = tmap(lambda x,d,n: x + self.dt * d + n, x, d1, dWt)
@@ -244,6 +244,8 @@ class TVB(nn.Module):
     bold_buf_size: int = 2000
     bold_dt: float = 0.01
     chunksize: int = 1000
+    tavg_period: float = 1.
+    initial_cond: Optional[jnp.array] = jnp.array([])
 
     def delay_apply(self, dh: DelayHelper, t, buf):
         return (dh.Wt * buf[t - dh.lags, dh.ix_lag_from, :]).sum(axis=1)
@@ -252,8 +254,6 @@ class TVB(nn.Module):
         def tvb_dfun(buf, x, t, stim):
             coupled_x = self.delay_apply(self.tvb_p['dh'], t, buf[...,:self.nst_vars])
             coupling_term = coupled_x[:,:1] # firing rate coupling only for QIF
-            # jax.debug.print('stim {x}', x=stim[:,1:])
-            # jax.debug.print('x {x} r_pars {y} coupling {z}', x=x[0], y=region_pars[0], z=coupling_term[0])
             return nmm(x, region_pars, g*coupling_term+stim[:,1:])
         return tvb_dfun
 
@@ -272,7 +272,8 @@ class TVB(nn.Module):
             jax.random.uniform(key=key, shape=(dh.n_from, 1), minval=0.1, maxval=2.0),
             jax.random.uniform(key=key, shape=(dh.n_from, 1), minval=-2., maxval=1.5)
             ]
-        # initial_cond = fixed_initial_cond if fixed_initial_cond.any() else initial_cond
+        initial_cond = self.initial_cond if fixed_initial_cond else initial_cond
+
         # horizon is set at the start of the buffer because rolled at the start of chunk
         buf = buf.at[int(1/self.dt):,:,:self.nst_vars].add( initial_cond )
         return buf
@@ -285,14 +286,12 @@ class TVB(nn.Module):
         # jax.debug.print('stim {x}', x=stimulus)
         # pass time count to the scanned integrator
         t_count = jnp.tile(jnp.arange(int(1/self.dt))[...,None,None], (self.tvb_p['dh'].n_from, 1)) # (buf_len, regions, state_vars)
-        
         stim = jnp.zeros(t_count.shape)
         # stimulus = jnp.repeat(stimulus, int(1/self.dt))[...,None]
         stim = stim.at[:,:,:].set(jnp.tile(stimulus[...,None], self.tvb_p['dh'].n_from)[...,None]) if self.training else stim.at[:,self.node_stim,:].set(stimulus[...,None])
         stim_t_count = jnp.c_[t_count, stim]
-        # jax.debug.print('stim_t_count {x}', x=stim_t_count.shape)
         buf, rv = module(buf, dWt, stim_t_count)
-        return buf, jnp.mean(rv.reshape(-1, 10, self.tvb_p['dh'].n_from, 2), axis=1)
+        return buf, jnp.mean(rv.reshape(-1, int(1/self.tavg_period), self.tvb_p['dh'].n_from, 2), axis=1)
 
     def bold_monitor(self, module, bold_buf, rv, p=bold_default_theta):
         t_count = jnp.tile(jnp.arange(rv.shape[0])[...,None, None,None], (4, self.tvb_p['dh'].n_from, 2)) # (buf_len, regions, state_vars)
@@ -303,10 +302,9 @@ class TVB(nn.Module):
 
 
     @nn.compact
-    def __call__(self, inputs, g=0, sim_len=0, seed=42, initial_cond=jnp.array([]), mlp=True):
+    def __call__(self, region_pars, g=0, sim_len=0, seed=42, initial_cond=False, mlp=True):
         # if inputs==None:
         #     inputs = jnp.ones((1, self.nst_vars))
-        region_pars = inputs
         key = jax.random.PRNGKey(seed)
         # buf = self.initialize_buffer(key, initial_cond)
         
@@ -323,12 +321,12 @@ class TVB(nn.Module):
         module = self.integrator(tvb_dfun, self.step, self.adhoc, self.dt, nh=int(self.tvb_p['dh'].max_lag))
         run_chunk = nn.scan(self.chunk.__call__)
         run_sim = nn.scan(run_chunk)
-
+        
         buf = self.initialize_buffer(key, initial_cond)
         
-        # stimulus = self.stimulus.reshape((sim_len, int(self.chunksize*self.dt), -1)) if jnp.any(self.stimulus) else jnp.zeros((sim_len, int(self.chunksize*self.dt), 1))
-        stimulus = jnp.zeros((sim_len, int(self.chunksize*self.dt), 1))
-        # jax.debug.print('stim shape {x}', x=stimulus.shape)
+        stimulus = self.stimulus.reshape((sim_len, int(self.chunksize*self.dt), -1)) if jnp.any(self.stimulus) else jnp.zeros((sim_len, int(self.chunksize*self.dt), 1))
+        # stimulus = jnp.zeros((sim_len, int(self.chunksize*self.dt), 1))
+        # jax.debug.print('stim shape {x}', x=stimulus)
         buf, rv = run_sim(module, buf, stimulus, jax.random.split(key, (sim_len, int(self.chunksize*self.dt))))
 
         dummy_adhoc_bold = lambda x: x
