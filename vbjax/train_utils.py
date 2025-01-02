@@ -9,7 +9,7 @@ def log_likelihood_MADE(ms, logp, x, *args):
 
 def log_likelihood_MAF(x, *arg):
     u, logdet_dudx = x
-    return -(- 0.5 * u.shape[1] * jnp.log(2 * jnp.pi) - 0.5 * jnp.sum(u ** 2, axis=1) + logdet_dudx)
+    return (- 0.5 * u.shape[1] * jnp.log(2 * jnp.pi) - 0.5 * jnp.sum(u ** 2, axis=1) + logdet_dudx)
 
 def mse_ode(traj, x, *arg):
   return jnp.mean((traj-x)**2)
