@@ -10,6 +10,7 @@ from flax.linen.initializers import zeros
 import tqdm
 from .neural_mass import bold_dfun, bold_default_theta
 from flax.core.frozen_dict import freeze, unfreeze
+from functools import partial
 
 
 DelayHelper = namedtuple('DelayHelper', 'Wt lags ix_lag_from max_lag n_to n_from')
@@ -86,7 +87,6 @@ class Heun_step(nn.Module):
     p: Optional[Any]
     stvar: Optional[int] = 0
     external_i: Optional[int] = False
-    
 
     @nn.compact
     def __call__(self, x, xs, t, *args):
@@ -110,7 +110,6 @@ class Euler_step(nn.Module):
     stvar: Optional[int] = 0
     external_i: Optional[int] = False
     
-
     @nn.compact
     def __call__(self, x, xs, t, *args):
         tmap = jax.tree_util.tree_map
@@ -151,8 +150,6 @@ class Buffer_step(nn.Module):
     nh: Optional[int]
     p: Optional[Any]
     external_i: Optional[int] = False
-    
-    
 
     @nn.compact
     def __call__(self, buf, dWt, t, *args):
@@ -250,11 +247,25 @@ class TVB(nn.Module):
     def delay_apply(self, dh: DelayHelper, t, buf):
         return (dh.Wt * buf[t - dh.lags, dh.ix_lag_from, :]).sum(axis=1)
     
-    def fwd(self, nmm, region_pars, g):
+    def fwd(self, nmm, region_pars):
         def tvb_dfun(buf, x, t, stim):
-            coupled_x = self.delay_apply(self.tvb_p['dh'], t, buf[...,:self.nst_vars])
-            coupling_term = coupled_x[:,:1] # firing rate coupling only for QIF
-            return nmm(x, region_pars, g*coupling_term+stim[:,1:])
+            # jax.debug.print('buf shape {x}', x=buf.shape)
+            buf_temp = buf.copy()
+            @partial(jax.jit, static_argnames=['indices'])
+            def f(x, indices=self.tvb_p['lh_splits'].tolist()):
+                return jnp.split(x, indices, axis=1)
+            buf_temp = jnp.hstack([jnp.mean(buf_i, axis=1)[:,None,:] for buf_i in f(buf_temp)])
+            # jax.debug.print('buf_temp shape {x}', x=buf_temp.shape)
+            global_coupling = self.delay_apply(self.tvb_p['dh'], t, buf_temp[...,:self.nst_vars])
+            # jax.debug.print('global_coupling shape {x}', x=global_coupling.shape)
+            global_coupling = jnp.repeat(global_coupling, self.tvb_p['lh_repeats'], axis=0)
+            # jax.debug.print('global_coupling resshaped {x}', x=global_coupling.shape)
+            global_coupling_term =  self.tvb_p['g_global']*global_coupling[:,:1]+stim[:,1:] # firing rate coupling only for QIF
+            
+            # jax.debug.print('global_coupling {x}', x=global_coupling_term[0])
+            local_coupling = self.tvb_p['surface']@x[:,:1]
+            local_coupling_term = self.tvb_p['g_local']*local_coupling
+            return nmm(x, region_pars, local_coupling_term+global_coupling_term)
         return tvb_dfun
 
     def noise_fill(self, buf, nh, key):
@@ -267,10 +278,10 @@ class TVB(nn.Module):
     def initialize_buffer(self, key, fixed_initial_cond):        
         dh = self.tvb_p['dh']
         nh = int(dh.max_lag)
-        buf = jnp.zeros((nh + int(1/self.dt) + 1, dh.n_from, self.nst_vars))
+        buf = jnp.zeros((nh + int(1/self.dt) + 1, self.tvb_p['n_vertices'], self.nst_vars))
         initial_cond = jnp.c_[
-            jax.random.uniform(key=key, shape=(dh.n_from, 1), minval=0.1, maxval=2.0),
-            jax.random.uniform(key=key, shape=(dh.n_from, 1), minval=-2., maxval=1.5)
+            jax.random.uniform(key=key, shape=(self.tvb_p['n_vertices'], 1), minval=0.1, maxval=2.0),
+            jax.random.uniform(key=key, shape=(self.tvb_p['n_vertices'], 1), minval=-2., maxval=1.5)
             ]
         initial_cond = self.initial_cond if fixed_initial_cond else initial_cond
 
@@ -285,16 +296,16 @@ class TVB(nn.Module):
         dWt = buf[nh+1:] # initialize carry noise filled
         # jax.debug.print('stim {x}', x=stimulus)
         # pass time count to the scanned integrator
-        t_count = jnp.tile(jnp.arange(int(1/self.dt))[...,None,None], (self.tvb_p['dh'].n_from, 1)) # (buf_len, regions, state_vars)
+        t_count = jnp.tile(jnp.arange(int(1/self.dt))[...,None,None], (self.tvb_p['n_vertices'], 1)) # (buf_len, regions, state_vars)
         stim = jnp.zeros(t_count.shape)
         # stimulus = jnp.repeat(stimulus, int(1/self.dt))[...,None]
-        stim = stim.at[:,:,:].set(jnp.tile(stimulus[...,None], self.tvb_p['dh'].n_from)[...,None]) if self.training else stim.at[:,self.node_stim,:].set(stimulus[...,None])
+        stim = stim.at[:,:,:].set(jnp.tile(stimulus[...,None], self.tvb_p['n_vertices'])[...,None]) if self.training else stim.at[:,self.node_stim,:].set(stimulus[...,None])
         stim_t_count = jnp.c_[t_count, stim]
         buf, rv = module(buf, dWt, stim_t_count)
-        return buf, jnp.mean(rv.reshape(-1, int(1/self.tavg_period), self.tvb_p['dh'].n_from, 2), axis=1)
+        return buf, jnp.mean(rv.reshape(-1, int(1/self.tavg_period), self.tvb_p['n_vertices'], 2), axis=1)
 
     def bold_monitor(self, module, bold_buf, rv, p=bold_default_theta):
-        t_count = jnp.tile(jnp.arange(rv.shape[0])[...,None, None,None], (4, self.tvb_p['dh'].n_from, 2)) # (buf_len, regions, state_vars)
+        t_count = jnp.tile(jnp.arange(rv.shape[0])[...,None, None,None], (4, self.tvb_p['n_vertices'], 2)) # (buf_len, regions, state_vars)
         bold_buf, bold = module(bold_buf, rv, t_count)
         s, f, v, q = bold_buf
         return bold_buf, p.v0 * (p.k1 * (1. - q) + p.k2 * (1. - q / v) + p.k3 * (1. - v))
@@ -302,7 +313,7 @@ class TVB(nn.Module):
 
 
     @nn.compact
-    def __call__(self, region_pars, g=0, sim_len=0, seed=42, initial_cond=False, mlp=True):
+    def __call__(self, region_pars, sim_len=0, seed=42, initial_cond=False, mlp=True):
         # if inputs==None:
         #     inputs = jnp.ones((1, self.nst_vars))
         key = jax.random.PRNGKey(seed)
@@ -310,10 +321,10 @@ class TVB(nn.Module):
         
         if mlp:
             nmm = lambda x, xs, *args: self.dfun(self.dfun_pars, x, xs, *args)
-            tvb_dfun = self.fwd(nmm, region_pars, g)
+            tvb_dfun = self.fwd(nmm, region_pars)
         else:            
             nmm = lambda x, xs, *args: self.dfun(x, xs, *args)
-            tvb_dfun = self.fwd(nmm, region_pars, g)
+            tvb_dfun = self.fwd(nmm, region_pars)
 
         # nmm = lambda x, xs, *args: self.dfun(self.dfun_pars, x, xs, *args) if mlp else self.dfun.__call__
         # tvb_dfun = self.fwd(nmm, region_pars, g)
@@ -334,11 +345,11 @@ class TVB(nn.Module):
         module = self.integrator(bold_dfun_p, Heun_step, dummy_adhoc_bold, self.bold_dt, nh=int(self.tvb_p['dh'].max_lag), p=1)
         run_bold = nn.scan(self.bold_monitor.__call__)
 
-        bold_buf = jnp.ones((4, self.tvb_p['dh'].n_from, 1))
+        bold_buf = jnp.ones((4, self.tvb_p['n_vertices'], 1))
         bold_buf = bold_buf.at[0].set(1.)
 
-        bold_buf, bold = run_bold(module, bold_buf, rv[...,0].reshape((-1, int(self.bold_buf_size), self.tvb_p['dh'].n_from, 1)))
-        return rv.reshape(-1, self.tvb_p['dh'].n_from, self.nst_vars), bold
+        bold_buf, bold = run_bold(module, bold_buf, rv[...,0].reshape((-1, int(self.bold_buf_size), self.tvb_p['n_vertices'], 1)))
+        return rv.reshape(-1, self.tvb_p['n_vertices'], self.nst_vars), bold
 
 
 
@@ -461,7 +472,7 @@ class Additive_c(nn.Module):
 
 
 class MontBrio(nn.Module):
-    dfun_pars: None #Optional[defaultdict] = mpr_default_theta
+    dfun_pars: Optional[defaultdict] = None
     coupled: bool = False
     scaling_factor: float = 1.
 
