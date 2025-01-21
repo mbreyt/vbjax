@@ -542,32 +542,29 @@ class NeuralOdeWrapper(nn.Module):
 
 
 class Encoder(nn.Module):
-    in_dim: int
-    latent_dim: int
     act_fn: Callable
-    n_hiddens: Sequence[int] = None
+    n_hiddens: Sequence[int]
 
-    def setup(self, n_hiddens: Optional[Sequence] = None):
-        n_hiddens = n_hiddens[::-1] if n_hiddens else [self.in_dim, 4*self.latent_dim, 2*self.latent_dim, self.latent_dim][::-1]
-        self.layers = [nn.Dense(feat) for feat in n_hiddens]
+    def setup(self):
+        self.layers = [nn.Dense(feat) for feat in self.n_hiddens]
 
     def __call__(self, inputs):
         x = inputs
-        for layer in self.layers:
+        for layer in self.layers[:-1]:
             x = layer(x)
             x = self.act_fn(x)
-        return x
+        mean_x = self.layers[-1](x)
+        logvar_x = self.layers[-1](x)
+        return mean_x, logvar_x
+
 
 
 class Decoder(nn.Module):
-    in_dim: int
-    latent_dim: int
     act_fn: Callable
-    n_hiddens: Sequence[int] = None
+    n_hiddens: Sequence[int]
 
-    def setup(self, n_hiddens: Optional[Sequence] = None):
-        n_hiddens = n_hiddens[::-1] if n_hiddens else [self.in_dim, 4*self.latent_dim, 2*self.latent_dim, self.latent_dim][::-1]
-        self.layers = [nn.Dense(feat) for feat in n_hiddens]
+    def setup(self):
+        self.layers = [nn.Dense(feat) for feat in self.n_hiddens[::-1]]
 
     def __call__(self, inputs):
         x = inputs
@@ -575,7 +572,39 @@ class Decoder(nn.Module):
             x = layer(x)
             x = self.act_fn(x)
         x = self.layers[-1](x)
+        x = nn.softplus(x)
         return x
+
+
+def reparameterize(rng, mean, logvar):
+  std = jnp.exp(0.5 * logvar)
+  eps = random.normal(rng, logvar.shape)
+  return mean + eps * std
+
+
+class VAE(nn.Module):
+    act_fn: Callable
+    n_hiddens: Sequence[int]
+
+    def setup(self):
+        self.encoder = Encoder(self.act_fn, self.n_hiddens[1:]) # remove input dim
+        self.decoder = Decoder(self.act_fn, self.n_hiddens)
+
+    def __call__(self, x, z_rng):
+        mean, logvar = self.encoder(x)
+        z = reparameterize(z_rng, mean, logvar)
+        recon_x = self.decoder(z)
+        return recon_x, mean, logvar
+
+    def generate(self, z, z_rng):
+        return jax.random.poisson(z_rng, self.decoder(z))
+
+
+
+
+
+
+
 
 
 class Autoencoder(nn.Module):
