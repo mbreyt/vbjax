@@ -2,7 +2,6 @@ import jax.numpy as jnp
 from flax import linen as nn
 from typing import Callable, Sequence, Optional, Any
 from collections import namedtuple, defaultdict
-from jax._src.prng import PRNGKeyArrayImpl
 import jax.random as random
 from vbjax.layers import MaskedMLP, OutputLayer, create_degrees, create_masks, OutputLayerAdditive
 import jax
@@ -16,7 +15,6 @@ from functools import partial
 DelayHelper = namedtuple('DelayHelper', 'Wt lags ix_lag_from max_lag n_to n_from')
 
 class GaussianMADE(nn.Module):
-    key: PRNGKeyArrayImpl
     in_dim: int
     n_hiddens: Sequence[int]
     act_fn: Callable
@@ -49,7 +47,6 @@ class GaussianMADE(nn.Module):
 
 
 class MAF(nn.Module):
-    key: PRNGKeyArrayImpl
     in_dim: int
     n_hiddens: Sequence[int]
     act_fn: Callable
@@ -204,7 +201,7 @@ class Integrator(nn.Module):
     dfun: Callable
     step: Callable
     adhoc: Callable
-    dt: float = 1.0
+    dt: float = 1.
     stvar: Optional[int] = 0
     nh: Optional[int] = None
     p: Optional[Any] = True
@@ -229,20 +226,20 @@ class TVB(nn.Module):
     dfun: Callable
     nst_vars: int
     n_pars: int
-    dfun_pars: Optional[defaultdict] = jnp.array([])
+    dfun_pars: Optional[Any] = None
     dt: float = 0.1
     integrator: Optional[Callable] = Integrator
     step: Callable = Buffer_step
     adhoc: Callable = lambda x : x
     gfun: Callable = lambda x : x
-    stimulus: Optional[Sequence] = jnp.array([])
+    stimulus: Optional[Sequence] = None
     node_stim = 0
     training: bool = False
     bold_buf_size: int = 2000
     bold_dt: float = 0.01
     chunksize: int = 1000
     tavg_period: float = 1.
-    initial_cond: Optional[jnp.array] = jnp.array([])
+    initial_cond: Optional[jnp.array] = None
 
     def delay_apply(self, dh: DelayHelper, t, buf):
         return (dh.Wt * buf[t - dh.lags, dh.ix_lag_from, :]).sum(axis=1)
@@ -394,6 +391,7 @@ class Simple_MLP(nn.Module):
         
         x = jnp.c_[x, xs]
         x = jnp.c_[x, args[0]] if self.coupled else x
+        # jax.debug.print('x shape {x}', x=x.shape)
         # jax.debug.print('x[0] {x}', x=x[:2])
         # jax.debug.print('x[0] {x}', x=x[0])
         for layer in self.layers:
@@ -544,17 +542,20 @@ class NeuralOdeWrapper(nn.Module):
 class Encoder(nn.Module):
     act_fn: Callable
     n_hiddens: Sequence[int]
+    kernel_init: Callable = jax.nn.initializers.normal(10e-3)
 
     def setup(self):
-        self.layers = [nn.Dense(feat) for feat in self.n_hiddens]
+        self.layers = [nn.Dense(feat, kernel_init=self.kernel_init) for feat in self.n_hiddens]
+        self.mean = nn.Dense(self.n_hiddens[-1], name='fc2_mean', kernel_init=self.kernel_init)
+        self.logvar = nn.Dense(self.n_hiddens[-1], name='fc2_logvar', kernel_init=self.kernel_init)
 
     def __call__(self, inputs):
         x = inputs
         for layer in self.layers[:-1]:
             x = layer(x)
             x = self.act_fn(x)
-        mean_x = self.layers[-1](x)
-        logvar_x = self.layers[-1](x)
+        mean_x = self.mean(x)
+        logvar_x = self.logvar(x)
         return mean_x, logvar_x
 
 
@@ -562,9 +563,12 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     act_fn: Callable
     n_hiddens: Sequence[int]
+    kernel_init: Callable = jax.nn.initializers.normal(10e-3)
 
     def setup(self):
-        self.layers = [nn.Dense(feat) for feat in self.n_hiddens[::-1]]
+        self.layers = [nn.Dense(feat, kernel_init=self.kernel_init) for feat in self.n_hiddens[::-1]]
+        self.mean = nn.Dense(self.n_hiddens[::-1][-1], name='decod_mean', kernel_init=self.kernel_init)
+        self.logvar = nn.Dense(self.n_hiddens[::-1][-1], name='decod_logvar', kernel_init=self.kernel_init)
 
     def __call__(self, inputs):
         x = inputs
@@ -572,14 +576,14 @@ class Decoder(nn.Module):
             x = layer(x)
             x = self.act_fn(x)
         x = self.layers[-1](x)
-        x = nn.softplus(x)
-        return x
+        return self.mean(x), self.logvar(x)
 
 
 def reparameterize(rng, mean, logvar):
   std = jnp.exp(0.5 * logvar)
   eps = random.normal(rng, logvar.shape)
   return mean + eps * std
+
 
 
 class VAE(nn.Module):
@@ -593,15 +597,109 @@ class VAE(nn.Module):
     def __call__(self, x, z_rng):
         mean, logvar = self.encoder(x)
         z = reparameterize(z_rng, mean, logvar)
-        recon_x = self.decoder(z)
-        return recon_x, mean, logvar
+        recon_m, recon_logvar = self.decoder(z)
+        # recon_x = self.decoder(mean)
+        return recon_m, recon_logvar, mean, logvar
 
     def generate(self, z, z_rng):
         return jax.random.poisson(z_rng, self.decoder(z))
 
 
+class Encoder_ODE(nn.Module):
+    act_fn: Callable
+    n_hiddens: Sequence[int]
+    # kernel_init: Callable = jax.nn.initializers.normal(10e-3)
+    kernel_init: Callable = jax.nn.initializers.lecun_normal()
+    
+    def setup(self):
+        self.layers = [nn.Dense(feat, kernel_init=self.kernel_init) for feat in self.n_hiddens]
+
+    def __call__(self, inputs):
+        x = inputs
+        for layer in self.layers[:-1]:
+            x = layer(x)
+            x = self.act_fn(x)
+        x = self.layers[-1](x)
+        return x
 
 
+
+class Decoder_ODE(nn.Module):
+    act_fn: Callable
+    n_hiddens: Sequence[int]
+    # kernel_init: Callable = jax.nn.initializers.normal(10e-6)
+    kernel_init: Callable = jax.nn.initializers.lecun_normal()
+
+    def setup(self):
+        self.layers = [nn.Dense(feat, kernel_init=self.kernel_init) for feat in self.n_hiddens]
+
+    def __call__(self, inputs):
+        x = inputs
+        for layer in self.layers[:-1]:
+            x = layer(x)
+            x = self.act_fn(x)
+        x = self.layers[-1](x)
+        x = nn.sigmoid(x)
+        return x
+
+
+class MLP(nn.Module):
+    out_dim: int
+    n_hiddens: Sequence[int]
+    act_fn: Callable
+    kernel_init: Callable = jax.nn.initializers.normal(1e-6)
+    coupled: bool = False
+    n_pars: int = 0
+
+    def setup(self):
+        self.layers = [nn.Dense(feat, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros) for feat in self.n_hiddens]
+        self.output = nn.Dense(self.out_dim, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros)
+    
+    @nn.compact
+    def __call__(self, x, xs, *args):
+        x = jnp.c_[x, xs]
+        x = jnp.c_[x, args[0]] if self.coupled else x
+        for layer in self.layers:
+            x = layer(x)
+            x = self.act_fn(x)
+        x = self.output(x)
+        return x
+
+class Autoencoder_ODE(nn.Module):
+    act_fn: Callable
+    enc_hiddens: Sequence[int]
+    dec_hiddens: Sequence[int]
+    ode: Optional[bool] = True
+    step: Optional[Callable] = Heun_step
+    integrator: Optional[Callable] = Integrator
+    network: Optional[Callable] = MLP
+    ode_n_hiddens: Optional[Sequence] = None
+    ode_act_fn: Optional[Callable] = None
+    adhoc: Callable = lambda x : x
+    in_ax: Optional[tuple] = (0,0)
+    dt: Optional[float] = .1
+
+    def setup(self):
+        self.encoder = Encoder_ODE(self.act_fn, self.enc_hiddens[1:]) # remove input dim
+        self.decoder = Decoder_ODE(self.act_fn, self.dec_hiddens)
+        self.dfun = self.network(self.dec_hiddens[0], self.ode_n_hiddens, self.ode_act_fn)
+        self.integrate = self.integrator(self.dfun, self.step, self.adhoc, in_ax=self.in_ax)
+
+    def fwd(self, x, z):
+        # xs =  x[...,:z.shape[-1]] # initialize carry
+        xs = x[...,-2:] ### CAREFUL HARDCODED NUMBER of PARAMES (eta, Iext)
+        # xs = jnp.c_[jnp.ones((xs.shape[0], xs.shape[1], 1))*-5, jnp.ones((xs.shape[0], xs.shape[1], 1)), jnp.zeros((xs.shape[0], xs.shape[1], 1))] # add time
+        t = jnp.tile(jnp.arange(int(1/self.dt))[...,None,None], (x.shape[0], x.shape[1],)) # (buf_len, regions, state_vars)
+        return self.integrate(z, xs, t)[1]
+
+    def __call__(self, x):
+        # jax.debug.print('x {x}', x=x.shape)
+        z = self.encoder(x[0,...,:-2]) if self.ode else self.encoder(x[...,:-2]) ### CAREFUL HARDCODED NUMBER of PARAMES (eta, Iext)
+        y = self.fwd(x, z) if self.ode else z
+        x_hat = self.decoder(y.reshape(-1, z.shape[-1]))
+        # x_hat = nn.scan(self.decoder)(y)
+        out = x_hat.reshape(x.shape[0], x.shape[1], -1) if self.ode else x_hat
+        return out, y
 
 
 
@@ -614,7 +712,7 @@ class Autoencoder(nn.Module):
     ode_act_fn: Callable
     ode: bool = False
     n_hiddens: Sequence[int] = None
-    kernel_init: Callable = jax.nn.initializers.normal(10e-3)
+    kernel_init: Callable = jax.nn.initializers.normal(10e-6)
     step: Optional[Callable] = Heun_step
     integrator: Optional[Callable] = Integrator
     network: Optional[Callable] = Simple_MLP
@@ -641,3 +739,61 @@ class Autoencoder(nn.Module):
 
         return y
 
+
+class LSTM(nn.Module):
+    features: int
+
+    @nn.compact
+    def __call__(self, x):
+        ScanLSTM = nn.scan(
+                nn.recurrent.LSTMCell, variable_broadcast="params",
+                split_rngs={"params": False}, in_axes=1, out_axes=1
+            )
+
+        lstm = ScanLSTM(self.features)
+        input_shape =  x[:, 0].shape
+        carry = lstm.initialize_carry(jax.random.key(0), input_shape)
+        carry, x = lstm(carry, x)
+        return x
+  
+
+class Autoencoder_LSTM(nn.Module):
+    enc_hiddens: Sequence[int]
+    dec_hiddens: Sequence[int]
+    ode: Optional[bool] = True
+    step: Optional[Callable] = Heun_step
+    integrator: Optional[Callable] = Integrator
+    network: Optional[Callable] = MLP
+    ode_n_hiddens: Optional[Sequence] = None
+    ode_act_fn: Optional[Callable] = None
+    adhoc: Callable = lambda x : x
+    in_ax: Optional[tuple] = (0,0)
+    dt: Optional[float] = .1
+
+    def setup(self):
+        self.encoders = [LSTM(n_hidden) for n_hidden in self.enc_hiddens] # remove input dim
+        self.decoder = [LSTM(n_hidden) for n_hidden in self.dec_hiddens]
+        self.output = nn.Dense(self.dec_hiddens[-1])
+        self.dfun = self.network(self.dec_hiddens[0], self.ode_n_hiddens, self.ode_act_fn)
+        self.integrate = self.integrator(self.dfun, self.step, self.adhoc, in_ax=self.in_ax)
+
+    def fwd(self, x, z):
+        # xs =  x[...,:z.shape[-1]] # initialize carry
+        xs = x[...,-2:] ### CAREFUL HARDCODED NUMBER of PARAMES (eta, Iext)
+        # xs = jnp.c_[jnp.ones((xs.shape[0], xs.shape[1], 1))*-5, jnp.ones((xs.shape[0], xs.shape[1], 1)), jnp.zeros((xs.shape[0], xs.shape[1], 1))] # add time
+        t = jnp.tile(jnp.arange(int(1/self.dt))[None,...,None], (x.shape[0], 1, x.shape[1],)) # (buf_len, regions, state_vars)
+        # jax.debug.print('z_shape: {x} xs_shape {y} t shape {z}', x=z.shape, y=xs.shape, z=t.shape)
+        return self.integrate(z, xs, t)[1]
+
+    def __call__(self, x):
+        z = x[...,:-2]
+        for lstm in self.encoders:
+            z = lstm(z)
+        # jax.debug.print('z_shape: {x} x_shape {y}', x=z.shape, y=x.shape)
+        y = self.fwd(x, z[0]) if self.ode else z
+        x_hat = y
+        for lstm in self.decoder:
+            x_hat = lstm(x_hat)
+        x_hat = self.output(x_hat)
+        # x_hat = nn.sigmoid(x_hat)
+        return (x_hat, y)
