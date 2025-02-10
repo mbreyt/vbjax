@@ -279,7 +279,7 @@ class TVB(nn.Module):
         return buf
 
     def chunk(self, module, buf, stimulus, key):
-        nh = int(self.tvb_p['dh'].max_lag)
+        nh = int(self.tvb_p['dh'].max_lag) 
         buf = jnp.roll(buf, -int(1/self.dt), axis=0)
         buf = self.noise_fill(buf, nh, key)
         dWt = buf[nh+1:] # initialize carry noise filled
@@ -291,6 +291,8 @@ class TVB(nn.Module):
         stim = stim.at[:,:,:].set(jnp.tile(stimulus[...,None], self.tvb_p['dh'].n_from)[...,None]) if self.training else stim.at[:,self.node_stim,:].set(stimulus[...,None])
         stim_t_count = jnp.c_[t_count, stim]
         buf, rv = module(buf, dWt, stim_t_count)
+        jax.debug.print('rv shape {x}', x=rv.shape)
+        jax.debug.print('buf shape {x}', x=buf.shape)
         return buf, jnp.mean(rv.reshape(-1, int(1/self.tavg_period), self.tvb_p['dh'].n_from, 2), axis=1)
 
     def bold_monitor(self, module, bold_buf, rv, p=bold_default_theta):
@@ -302,7 +304,7 @@ class TVB(nn.Module):
 
 
     @nn.compact
-    def __call__(self, region_pars, g=0, sim_len=0, seed=42, initial_cond=False, mlp=True):
+    def __call__(self, region_pars, g=0, sim_len=0, seed=42, initial_cond=False, mlp=True, stimulus_yn=True):
         # if inputs==None:
         #     inputs = jnp.ones((1, self.nst_vars))
         key = jax.random.PRNGKey(seed)
@@ -324,9 +326,13 @@ class TVB(nn.Module):
         
         buf = self.initialize_buffer(key, initial_cond)
         
-        stimulus = self.stimulus.reshape((sim_len, int(self.chunksize*self.dt), -1)) if jnp.any(self.stimulus) else jnp.zeros((sim_len, int(self.chunksize*self.dt), 1))
+        stimulus = self.stimulus.reshape((sim_len, int(self.chunksize*self.dt), -1)) if stimulus_yn else jnp.zeros((sim_len, int(self.chunksize*self.dt), 1))
         # stimulus = jnp.zeros((sim_len, int(self.chunksize*self.dt), 1))
-        # jax.debug.print('stim shape {x}', x=stimulus)
+        # jax.debug.print('chuksize {x}', x=self.chunksize)
+        # jax.debug.print('dt {x}', x=self.dt)
+        # jax.debug.print('stim shape {x}', x=stimulus.shape)
+        # jax.debug.print('buf shape {x}', x=buf.shape)
+        # jax.debug.print('keys shape {x}', x=jax.random.split(key, (sim_len, int(self.chunksize*self.dt))).shape)
         buf, rv = run_sim(module, buf, stimulus, jax.random.split(key, (sim_len, int(self.chunksize*self.dt))))
 
         dummy_adhoc_bold = lambda x: x
