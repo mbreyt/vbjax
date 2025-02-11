@@ -2,7 +2,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from typing import Callable, Sequence, Optional, Any
 from collections import namedtuple, defaultdict
-from jax._src.prng import PRNGKeyArrayImpl
+# from jax._src.prng import PRNGKeyArrayImpl
 import jax.random as random
 from vbjax.layers import MaskedMLP, OutputLayer, create_degrees, create_masks, OutputLayerAdditive
 import jax
@@ -15,7 +15,7 @@ from flax.core.frozen_dict import freeze, unfreeze
 DelayHelper = namedtuple('DelayHelper', 'Wt lags ix_lag_from max_lag n_to n_from')
 
 class GaussianMADE(nn.Module):
-    key: PRNGKeyArrayImpl
+    # key: PRNGKeyArrayImpl
     in_dim: int
     n_hiddens: Sequence[int]
     act_fn: Callable
@@ -48,7 +48,7 @@ class GaussianMADE(nn.Module):
 
 
 class MAF(nn.Module):
-    key: PRNGKeyArrayImpl
+    # key: PRNGKeyArrayImpl
     in_dim: int
     n_hiddens: Sequence[int]
     act_fn: Callable
@@ -232,20 +232,23 @@ class TVB(nn.Module):
     dfun: Callable
     nst_vars: int
     n_pars: int
-    dfun_pars: Optional[defaultdict] = jnp.array([])
+    # dfun_pars: Optional[defaultdict] = jnp.array([])
+    dfun_pars: Optional[Any] = None
     dt: float = 0.1
     integrator: Optional[Callable] = Integrator
     step: Callable = Buffer_step
     adhoc: Callable = lambda x : x
     gfun: Callable = lambda x : x
-    stimulus: Optional[Sequence] = jnp.array([])
+    # stimulus: Optional[Sequence] = jnp.array([])
+    stimulus: Optional[Sequence] = None
     node_stim = 0
     training: bool = False
     bold_buf_size: int = 2000
     bold_dt: float = 0.01
     chunksize: int = 1000
     tavg_period: float = 1.
-    initial_cond: Optional[jnp.array] = jnp.array([])
+    # initial_cond: Optional[jnp.array] = jnp.array([])
+    initial_cond: Optional[jnp.array] = None
 
     def delay_apply(self, dh: DelayHelper, t, buf):
         return (dh.Wt * buf[t - dh.lags, dh.ix_lag_from, :]).sum(axis=1)
@@ -467,7 +470,8 @@ class Additive_c(nn.Module):
 
 
 class MontBrio(nn.Module):
-    dfun_pars: None #Optional[defaultdict] = mpr_default_theta
+    # dfun_pars: None #Optional[defaultdict] = mpr_default_theta
+    dfun_pars: Optional[defaultdict] = None
     coupled: bool = False
     scaling_factor: float = 1.
 
