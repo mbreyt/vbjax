@@ -294,8 +294,8 @@ class TVB(nn.Module):
         stim = stim.at[:,:,:].set(jnp.tile(stimulus[...,None], self.tvb_p['dh'].n_from)[...,None]) if self.training else stim.at[:,self.node_stim,:].set(stimulus[...,None])
         stim_t_count = jnp.c_[t_count, stim]
         buf, rv = module(buf, dWt, stim_t_count)
-        jax.debug.print('rv shape {x}', x=rv.shape)
-        jax.debug.print('buf shape {x}', x=buf.shape)
+        # jax.debug.print('rv shape {x}', x=rv.shape)
+        # jax.debug.print('buf shape {x}', x=buf.shape)
         return buf, jnp.mean(rv.reshape(-1, int(1/self.tavg_period), self.tvb_p['dh'].n_from, 2), axis=1)
 
     def bold_monitor(self, module, bold_buf, rv, p=bold_default_theta):
