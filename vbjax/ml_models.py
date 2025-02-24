@@ -392,6 +392,7 @@ class Simple_MLP(nn.Module):
         
         x = jnp.c_[x, xs]
         x = jnp.c_[x, args[0]] if self.coupled else x
+        # jax.debug.print('x {x}', x=x)
         # jax.debug.print('x[0] {x}', x=x[:2])
         # jax.debug.print('x[0] {x}', x=x[0])
         for layer in self.layers:
@@ -474,21 +475,17 @@ class MontBrio(nn.Module):
     dfun_pars: Optional[defaultdict] = None
     coupled: bool = False
     scaling_factor: float = 1.
-
-    def setup(self):
-        self.Delta = 1.0
-        self.tau = 1.0
-        self.I = 0
-        self.J = 15.0
-        self.cr = 1.0
-        self.cv = 0.0
+    Delta: Optional[float] = 1.0
+    tau: Optional[float] = 1.0
+    I: Optional[float] = 0
+    J: Optional[float] = 15.0
+    cr: Optional[float] = 1.0
+    cv: Optional[float] = 0.0
     
     @nn.compact
     def __call__(self, x, xs, *args):
         # xs contains regions parameters not implemented yet
         c = args[0] if self.coupled else jnp.zeros(x.shape)
-        # jax.debug.print('x[0] {x} xs[0] {y} c[0] {z}', x=x[0], y=xs[0], z=c[0])
-        # jax.debug.print('x {x} xs {y} c {z}', x=x.shape, y=xs.shape, z=c.shape)
         eta = xs
         r, V = x[:,:1], x[:,1:]
         I_c = self.cr * c[:,:1]
@@ -611,3 +608,148 @@ class Autoencoder(nn.Module):
 
         return y
 
+
+
+def reparameterize(rng, mean, logvar):
+    std = jnp.exp(0.5 * logvar)
+    eps = random.normal(rng, logvar.shape)
+    z = mean + std*eps
+    return z, mean, logvar
+
+
+class DUMMY(nn.Module):
+    act_fn: Callable
+    kernel_init: Callable = jax.nn.initializers.normal(1e-1)
+    
+    @nn.compact
+    def __call__(self, x, z_ng):
+        x = nn.Dense(2, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros)(x)
+        x = self.act_fn(x)
+        x = nn.Dense(2, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros)(x)
+        x = self.act_fn(x)
+        z, mean, logvar = reparameterize(z_ng, x[...,:1], x[...,1:])
+        return z, mean, logvar
+    
+
+class NeuralOdeWrapper2(nn.Module):
+    out_dim: int
+    extra_p: int
+    dt: Optional[float] = 1.
+    step: Optional[Callable] = Heun_step
+    integrator: Optional[Callable] = Integrator
+    dfun: Optional[Callable] = None
+    integrate: Optional[bool] = True
+    coupled: Optional[bool] = False
+    stvar: Optional[int] = 0
+    adhoc: Optional[Callable] = lambda x : x
+    dummy : Optional[Callable] = None
+    
+
+    @nn.compact
+    def __call__(self, inputs, z_rng, integrate=True, additive=False):
+        if not integrate:
+            if additive:
+                deriv = self.dfun(inputs[0], inputs[1], inputs[2])
+            else:
+                z = self.dummy(inputs[0][...,:2][None,...], z_rng)
+                deriv = self.dfun(inputs[0], z[0])
+            return deriv
+        
+        (x, i_ext) = inputs if self.coupled else (inputs, None)
+        in_ax = (0,0,0) if self.coupled else (0,0)
+        integrate = self.integrator(self.dfun.__call__, self.step, self.adhoc, self.dt, in_ax=in_ax, p=True)
+        
+        z = self.dummy(x[:,:,:2], z_rng)
+        
+        p = x[:,:,-self.extra_p:] # initialize carry param filled
+
+        t_count = jnp.tile(jnp.arange(x.shape[0])[...,None,None], (x.shape[1], x.shape[2])) # (length, train_samples, state_vars)
+        
+        x = x[0,:,:self.out_dim]
+        return integrate(x, p, t_count, z)[1]#, recon_m, recon_logvar, mean, logvar
+    
+
+def sample_i_ext(rng, mean, logvar):
+  std = jnp.exp(0.5 * logvar)
+  eps = random.normal(rng, mean.shape)
+  return mean + eps
+
+
+class DUMMY2(nn.Module):
+    act_fn: Callable
+    kernel_init: Callable = jax.nn.initializers.normal(1e-3)
+    
+    @nn.compact
+    def __call__(self, x, z_ng):
+        x = nn.Dense(2, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros)(x)
+        x = self.act_fn(x)
+        x = nn.Dense(2, kernel_init=self.kernel_init, bias_init=nn.initializers.zeros)(x)
+        y = sample_i_ext(z_ng, x[0,:,:1], x[0,:,1:])[None,...]
+        x = jnp.tile(y, (x.shape[0], 1, 1))
+        return x
+    
+
+
+class Encoder(nn.Module):
+    act_fn: Callable
+    n_hiddens: Sequence[int]
+    kernel_init: Callable = jax.nn.initializers.normal(10e-3)
+
+    def setup(self):
+        self.layers = [nn.Dense(feat, kernel_init=self.kernel_init) for feat in self.n_hiddens]
+        self.mean = nn.Dense(self.n_hiddens[-1], name='fc2_mean', kernel_init=self.kernel_init)
+        self.logvar = nn.Dense(self.n_hiddens[-1], name='fc2_logvar', kernel_init=self.kernel_init)
+
+    def __call__(self, inputs):
+        x = inputs
+        for layer in self.layers[:-1]:
+            x = layer(x)
+            x = self.act_fn(x)
+        mean_x = self.mean(x)
+        logvar_x = self.logvar(x)
+        return mean_x, logvar_x
+
+
+
+class Decoder(nn.Module):
+    act_fn: Callable
+    n_hiddens: Sequence[int]
+    kernel_init: Callable = jax.nn.initializers.normal(10e-3)
+
+    def setup(self):
+        self.layers = [nn.Dense(feat, kernel_init=self.kernel_init) for feat in self.n_hiddens[::-1]]
+        self.mean = nn.Dense(self.n_hiddens[::-1][-1], name='decod_mean', kernel_init=self.kernel_init)
+        self.logvar = nn.Dense(self.n_hiddens[::-1][-1], name='decod_logvar', kernel_init=self.kernel_init)
+
+    def __call__(self, inputs):
+        x = inputs
+        for layer in self.layers[:-1]:
+            x = layer(x)
+            x = self.act_fn(x)
+        x = self.layers[-1](x)
+        return self.mean(x), self.logvar(x)
+
+
+def reparameterize(rng, mean, logvar):
+  std = jnp.exp(0.5 * logvar)
+  eps = random.normal(rng, logvar.shape)
+  return mean + eps * std
+
+
+class VAE(nn.Module):
+    act_fn: Callable
+    n_hiddens: Sequence[int]
+
+    def setup(self):
+        self.encoder = Encoder(self.act_fn, self.n_hiddens[1:]) # remove input dim
+        self.decoder = Decoder(self.act_fn, self.n_hiddens)
+
+    def __call__(self, x, z_rng):
+        mean, logvar = self.encoder(x)
+        z = reparameterize(z_rng, mean, logvar)
+        recon_m, recon_logvar = self.decoder(z)
+        # recon_x = self.decoder(mean)
+        return recon_m, recon_logvar, z, mean, logvar
+
+    def generate(self, z, z_rng):
+        return jax.random.poisson(z_rng, self.decoder(z))
