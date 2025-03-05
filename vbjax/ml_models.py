@@ -195,7 +195,6 @@ class Buffer_step_euler(nn.Module):
         nx = tmap(self.adhoc, xi)
 
         # d2 = self.dfun(buf, xi, nh + t_step + 1,  t)
-
         # nx = tmap(lambda x,d1,d2,n: x + self.dt * 0.5*(d1 + d2) + n, x, d1, d2, dWt)
         nx = tmap(self.adhoc, nx)
         buf = tmap(lambda buf, nx: buf.at[nh + t_step + 1].set(nx), buf, nx)
@@ -486,11 +485,11 @@ class MontBrio(nn.Module):
     def __call__(self, x, xs, *args):
         # xs contains regions parameters not implemented yet
         c = args[0] if self.coupled else jnp.zeros(x.shape)
-        eta = xs
+        eta, J = xs[:,:1], xs[:,1:]
         r, V = x[:,:1], x[:,1:]
         I_c = self.cr * c[:,:1]
         r_dot =  (1 / self.tau) * (self.Delta / (jnp.pi * self.tau) + 2 * r * V)
-        v_dot = (1 / self.tau) * (V ** 2 + eta + self.J * self.tau * r + self.I + I_c - (jnp.pi ** 2) * (r ** 2) * (self.tau ** 2))
+        v_dot = (1 / self.tau) * (V ** 2 + eta + J * self.tau * r + self.I + I_c - (jnp.pi ** 2) * (r ** 2) * (self.tau ** 2))
         return jnp.c_[r_dot, v_dot]*self.scaling_factor
 
 
